@@ -190,9 +190,9 @@ def main(ref_audio_path, syn_audio_path, sr=16000, plot=True, save_plot_path=Non
 if __name__ == "__main__":
     # ========== 在此处配置你的音频文件对 ==========
     audio_tasks = [
-        ('/Users/fxt/Desktop/原声2 山歌唱了几十年.m4a',
-         '/Users/fxt/Desktop/合成原声2.m4a',
-         '/Users/fxt/Desktop/【新】旋律对比/老调/原声2_对比.png'),
+        ('替换为参考音频路径',
+         '替换为合成音频路径',
+         '替换为图片保存路径'),
     ]
 
     for ref, syn, img in audio_tasks:

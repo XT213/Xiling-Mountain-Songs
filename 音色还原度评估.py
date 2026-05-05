@@ -49,8 +49,8 @@ if __name__ == "__main__":
     model = WavLMForXVector.from_pretrained(model_name).to(device).eval()
     
     # 3. 准备参考音频和合成音频
-    reference_audio = "/Users/fxt/Desktop/音色对比/张道深1（唱歌音）clean.wav"  # 参考歌手音频
-    synthesized_audio = "/Users/fxt/Desktop/音色对比/张道深1（唱歌音）clean.wav"  # 合成音频
+    reference_audio = ""  # 参考歌手音频
+    synthesized_audio = ""  # 合成音频
     
     # 4. 提取嵌入向量
     ref_emb = extract_speaker_embedding(reference_audio, model, processor, device)

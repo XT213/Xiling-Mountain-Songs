@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+山歌合成音色还原度评估工具（SingMOS 预训练模型版）
+使用 South-Twilight/SingMOS 的官方预训练模型进行 MOS 预测
+"""
+
+import importlib
+import json
+import os
+import sys
+import types
+
+import librosa
+import torch
+import torchaudio
+
+# ========== 配置区域：在这里修改音频路径 ==========
+
+# 运行模式: "compare" = 双文件对比, "batch" = 批量评估目录
+RUN_MODE = "compare"
+
+# ---------- SingMOS 配置 ----------
+MODEL_TAG = "South-Twilight/SingMOS:v1.1.2"
+MODEL_SPECIFIER = "singmos_pro"  # 可选: singmos_pro / singmos_v1
+TARGET_SR = 16000
+
+# ---------- compare 模式 ----------
+ORIGINAL_AUDIO = "参考音频路径"
+SYNTHESIZED_AUDIO = "合成音频路径"
+
+# ---------- batch 模式 ----------
+BATCH_AUDIO_DIR = "data/audio"
+BATCH_OUTPUT_FILE = "results.json"
+
+
+
+def patch_torchaudio_compat():
+    if not hasattr(torchaudio, "set_audio_backend"):
+        def _set_audio_backend(_backend):
+            return None
+        torchaudio.set_audio_backend = _set_audio_backend
+
+    if not hasattr(torchaudio, "get_audio_backend"):
+        def _get_audio_backend():
+            return None
+        torchaudio.get_audio_backend = _get_audio_backend
+
+    if not hasattr(torchaudio, "list_audio_backends"):
+        def _list_audio_backends():
+            return []
+        torchaudio.list_audio_backends = _list_audio_backends
+
+    if "torchaudio.sox_effects" not in sys.modules:
+        sox_effects_module = types.ModuleType("torchaudio.sox_effects")
+
+        def apply_effects_tensor(waveform, sample_rate, effects, channels_first=True):
+            return waveform, sample_rate
+
+        sox_effects_module.apply_effects_tensor = apply_effects_tensor
+        sys.modules["torchaudio.sox_effects"] = sox_effects_module
+
+
+def setup_environment():
+    patch_torchaudio_compat()
+    print("设置 SingMOS 评估环境...")
+    required_modules = ["librosa", "torch", "s3prl"]
+
+    for module_name in required_modules:
+        try:
+            importlib.import_module(module_name)
+            print(f"✓ {module_name} 已安装")
+        except Exception:
+            print(
+                "错误: 缺少依赖，请先安装: "
+                "pip install librosa torch torchaudio s3prl"
+            )
+            sys.exit(1)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"使用设备: {device}")
+    print(f"SingMOS 模型: {MODEL_TAG} / {MODEL_SPECIFIER}")
+    print("首次运行会从 GitHub 和 release 下载代码与权重")
+    return device
+
+
+def load_singmos_predictor(device):
+    print("正在加载 SingMOS 预训练模型...")
+    try:
+        predictor = torch.hub.load(
+            MODEL_TAG,
+            MODEL_SPECIFIER,
+            trust_repo=True,
+        )
+    except Exception as exc:
+        print("错误: 无法加载 SingMOS 预训练模型")
+        print("请确认当前环境可以访问 GitHub，并且已安装 s3prl")
+        raise RuntimeError(str(exc)) from exc
+
+    predictor = predictor.to(device)
+    predictor.eval()
+    print("✓ SingMOS 模型加载成功")
+    return predictor
+
+
+def load_audio_file(audio_path, target_sr=TARGET_SR):
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"音频文件不存在: {audio_path}")
+
+    waveform_np, sample_rate = librosa.load(audio_path, sr=target_sr, mono=True)
+    waveform = torch.from_numpy(waveform_np).unsqueeze(0).to(torch.float32)
+    length = torch.tensor([waveform.shape[1]], dtype=torch.long)
+    duration = waveform.shape[1] / sample_rate
+
+    print(f"✓ 音频加载成功: {os.path.basename(audio_path)}")
+    print(f"  采样率: {sample_rate}Hz, 时长: {duration:.2f}秒")
+    return waveform, length, sample_rate, duration
+
+
+def evaluate_audio_quality(audio_path, predictor, device="cpu"):
+    print(f"✓ 使用 SingMOS 评估器 (设备: {device})")
+    waveform, length, sample_rate, duration = load_audio_file(audio_path)
+
+    waveform = waveform.to(device)
+    length = length.to(device)
+
+    print("正在进行 SingMOS 预测...")
+    with torch.no_grad():
+        score = predictor(waveform, length).squeeze().item()
+
+    details = {
+        "file": os.path.basename(audio_path),
+        "sample_rate": sample_rate,
+        "duration_seconds": duration,
+        "model_tag": MODEL_TAG,
+        "model_specifier": MODEL_SPECIFIER,
+        "mos": score,
+    }
+
+    print("✓ SingMOS 预测完成")
+    return score, details
+
+
+def compare_audio_quality(original_path, synthesized_path, predictor, device="cpu"):
+    print("\n" + "=" * 60)
+    print("开始 SingMOS 对比评估")
+    print("=" * 60)
+
+    print(f"\n1. 评估原始音频: {os.path.basename(original_path)}")
+    orig_score, orig_details = evaluate_audio_quality(original_path, predictor, device)
+
+    print(f"\n2. 评估合成音频: {os.path.basename(synthesized_path)}")
+    synth_score, synth_details = evaluate_audio_quality(synthesized_path, predictor, device)
+
+    mos_gap = abs(orig_score - synth_score)
+    restoration_score = max(0.0, 100.0 - 20.0 * mos_gap)
+
+    print("\n" + "=" * 60)
+    print("评估结果对比")
+    print("=" * 60)
+    print(f"原始音频 MOS: {orig_score:.4f}")
+    print(f"合成音频 MOS: {synth_score:.4f}")
+    print(f"MOS 差值: {mos_gap:.4f}")
+    print(f"基于 MOS 差值的还原度: {restoration_score:.2f}%")
+    print("说明: SingMOS 直接输出的是 MOS，自定义还原度仅用于比较两段音频的分数接近程度")
+
+    if restoration_score >= 90:
+        rating = "优秀"
+    elif restoration_score >= 80:
+        rating = "良好"
+    elif restoration_score >= 70:
+        rating = "一般"
+    else:
+        rating = "较差"
+
+    print(f"还原度评级: {rating}")
+
+    return {
+        "original_mos": orig_score,
+        "synthesized_mos": synth_score,
+        "mos_gap": mos_gap,
+        "restoration_score": restoration_score,
+        "rating": rating,
+        "original_details": orig_details,
+        "synthesized_details": synth_details,
+    }
+
+
+def batch_evaluate_audio_files(audio_dir, output_file=None, predictor=None, device="cpu"):
+    if not os.path.exists(audio_dir):
+        print(f"目录不存在: {audio_dir}")
+        return None
+
+    audio_files = [
+        f for f in os.listdir(audio_dir)
+        if f.lower().endswith((".wav", ".mp3", ".flac", ".m4a"))
+    ]
+
+    if not audio_files:
+        print(f"在目录 {audio_dir} 中未找到音频文件")
+        return None
+
+    print(f"找到 {len(audio_files)} 个音频文件，开始批量评估...")
+
+    results = []
+    for audio_file in sorted(audio_files):
+        audio_path = os.path.join(audio_dir, audio_file)
+        print(f"\n评估: {audio_file}")
+
+        mos, details = evaluate_audio_quality(audio_path, predictor, device)
+        results.append({
+            "file": audio_file,
+            "mos": mos,
+            "details": details,
+        })
+        print(f"  MOS: {mos:.4f}")
+
+    if output_file and results:
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"\n结果已保存到: {output_file}")
+
+    return results
+
+
+def main():
+    print("山歌合成音色还原度评估工具")
+    print("基于 South-Twilight/SingMOS 官方预训练模型\n")
+
+    device = setup_environment()
+    predictor = load_singmos_predictor(device)
+
+    if RUN_MODE == "compare":
+        compare_audio_quality(ORIGINAL_AUDIO, SYNTHESIZED_AUDIO, predictor, device)
+    elif RUN_MODE == "batch":
+        batch_evaluate_audio_files(BATCH_AUDIO_DIR, BATCH_OUTPUT_FILE, predictor, device)
+    else:
+        print(f"未知运行模式: {RUN_MODE}，请设置为 'compare' 或 'batch'")
+
+
+if __name__ == "__main__":
+    main()

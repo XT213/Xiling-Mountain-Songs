@@ -19,3 +19,6 @@ transformers>=4.30.0
 # FunASR 和 modelscope（用于歌词识别）
 funasr>=0.6.0
 modelscope>=1.10.0
+
+# 歌声质量评估（SingMOS）
+s3prl
